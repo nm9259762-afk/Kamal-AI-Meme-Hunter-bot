@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kamal-ai-meme-hunter-24-7",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ENGINE", "class_name": "KamalEngine" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["KamalEngine"] }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  }
+}

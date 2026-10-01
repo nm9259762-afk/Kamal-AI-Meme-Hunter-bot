@@ -1,0 +1,1 @@
+-- Durable Object SQLite storage is used by the engine; this file is informational for future D1 migration.
