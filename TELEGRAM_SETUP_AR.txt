@@ -1,0 +1,33 @@
+KAMAL AI MEME HUNTER V2 — TELEGRAM
+
+1) أنشئ Bot من @BotFather وخذ Bot Token. لا تضع الـToken داخل GitHub أو داخل index.html.
+2) افتح محادثة البوت واضغط Start.
+3) للحصول على Chat ID، استخدم getUpdates بعد إرسال رسالة للبوت أو استخدم بوت موثوق لمعرفة Chat ID.
+4) على Cloudflare Worker أضف Secrets:
+   npx wrangler secret put TELEGRAM_BOT_TOKEN
+   npx wrangler secret put TELEGRAM_CHAT_ID
+5) أعد النشر:
+   npm run deploy
+6) افتح لوحة KAMAL AI واضغط TEST TELEGRAM. يجب أن تصل صورة اختبار إلى Telegram.
+
+الإشعارات التي يرسلها المحرك:
+- ENTRY: دخول صفقة جديدة.
+- TP1 / TP2 / TP3: مراحل جني الربح.
+- 2X / 5X / 10X / 25X / 50X / 100X / 250X / 500X.
+- 1000X RUNNER عند تحققها.
+- FINAL • SL أو FINAL • 1000X RUNNER عند إغلاق الصفقة.
+
+كل إشعار يحتوي على صورة بطاقة الصفقة، Entry، Price، P&L، Current X و Max X.
+
+ملاحظة: Telegram يستخدم Bot API الرسمي؛ sendPhoto يقبل رابط صورة، لذلك المحرك يرسل بطاقة رسم بياني مولدة ديناميكيًا وتظهر كصورة في Telegram. لا يتم وضع Bot Token داخل الواجهة أو GitHub.
+
+
+7) تشخيص الاتصال
+بعد إضافة الـSecrets افتح:
+  /api/telegram/status
+إذا ظهر configured:true و ok:true فهذا يعني أن الـBot Token وChat ID صالحان وقابلان للوصول.
+إذا ظهر خطأ مثل "chat not found" أرسل /start للبوت أو تأكد من Chat ID.
+إذا ظهر "Unauthorized" فـBot Token غير صحيح.
+
+8) ملاحظة مهمة
+لا يمكن للواجهة معرفة Bot Token، وهذا مقصود. بطاقة TELEGRAM في اللوحة تعرض CONNECTED فقط بعد نجاح فحص الخادم مع Telegram Bot API.

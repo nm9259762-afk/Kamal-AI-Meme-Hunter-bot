@@ -38,6 +38,47 @@ function makePlan(p,m,size){
 
 async function getJSON(url){ const r=await fetch(url,{headers:{'accept':'application/json'},cf:{cacheTtl:0}}); if(!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); }
 
+function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function xMultiple(entry, price){ const e=num(entry), p=num(price); return e>0 && p>0 ? p/e : 0; }
+function tradePnl(t, price=t.current){ return ((num(price)-num(t.entry))/Math.max(num(t.entry),1e-30))*num(t.notional); }
+function tradeMaxX(t, price=t.current){ return Math.max(1, num(t.maxX)||1, xMultiple(t.entry, price)); }
+function tgReady(env){ return Boolean(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID); }
+async function telegramCall(env, method, body){
+  if(!tgReady(env)) return {ok:false,skipped:true,error:'Telegram secrets are not configured'};
+  const r=await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, body instanceof FormData ? {method:'POST',body} : {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok || data.ok===false) throw new Error(data?.description || `Telegram HTTP ${r.status}`);
+  return data;
+}
+function tradeChartUrl(t, title, price, pnl, xNow, maxX, event){
+  const symbol=String(t.symbol||'TOKEN').replace(/[^A-Za-z0-9_$.-]/g,'').slice(0,18);
+  const labels=encodeURIComponent(JSON.stringify(['ENTRY','CURRENT','MAX X']));
+  const data=encodeURIComponent(JSON.stringify([1,Math.max(0,xNow),Math.max(0,maxX)]));
+  const titleText=encodeURIComponent(`${symbol} • ${event} • ${num(pnl)>=0?'+':''}$${num(pnl).toFixed(2)} • ${Math.max(0,maxX).toFixed(2)}X MAX`);
+  const cfg=encodeURIComponent(JSON.stringify({
+    type:'bar',
+    data:{labels:JSON.parse(decodeURIComponent(labels)),datasets:[{label:'X MULTIPLE',data:JSON.parse(decodeURIComponent(data)),backgroundColor:['#607080','#22d67a','#8c7cff']}]},
+    options:{plugins:{legend:{display:false},title:{display:true,text:titleText,color:'#eef2f7',font:{size:22,weight:'bold'}}},scales:{y:{beginAtZero:true,title:{display:true,text:'X',color:'#aab5c2'},ticks:{color:'#aab5c2'},grid:{color:'#26313d'}},x:{ticks:{color:'#aab5c2'},grid:{display:false}}}}
+  }));
+  return `https://quickchart.io/chart?width=1000&height=560&backgroundColor=%2305070c&c=${cfg}`;
+}
+
+async function notifyTrade(env, t, event, price, pnl=tradePnl(t,price), captionExtra=''){
+  if(!tgReady(env)) return {ok:false,skipped:true};
+  try{
+    const x=xMultiple(t.entry,price), maxX=tradeMaxX(t,price), closed=t.status==='CLOSED';
+    const title=event==='ENTRY'?'🚨 NEW MEME COIN TRADE':closed?'🏁 TRADE CLOSED':`⚡ ${event}`;
+    const resultLine=closed ? `Result: <b>${num(pnl)>=0?'+':''}$${num(pnl).toFixed(2)}</b>` : `Stage P&amp;L: <b>${num(pnl)>=0?'+':''}$${num(pnl).toFixed(2)}</b>`;
+    const caption=`${title}\n\n<b>${esc(t.symbol)}</b> • ${esc(t.chain)}\nEvent: <b>${esc(event)}</b>\nEntry: <code>${esc(Number(t.entry).toPrecision(8))}</code>\nPrice: <code>${esc(Number(price).toPrecision(8))}</code>\nX: <b>${Math.max(0,x).toFixed(2)}X</b>\nMax X: <b>${Math.max(0,maxX).toFixed(2)}X</b>\n${resultLine}${closed?`\nRemaining: <b>${(num(t.remaining)*100).toFixed(0)}%</b>`:''}${captionExtra?`\n${esc(captionExtra)}`:''}`;
+    const form=new FormData();
+    form.append('chat_id',String(env.TELEGRAM_CHAT_ID));
+    form.append('photo',tradeChartUrl(t,title,price,pnl,x,maxX,event));
+    form.append('caption',caption); form.append('parse_mode','HTML');
+    await telegramCall(env,'sendPhoto',form);
+    return {ok:true};
+  }catch(e){ return {ok:false,error:e.message}; }
+}
+
 export class KamalEngine extends DurableObject {
   constructor(ctx, env){ super(ctx,env); this.ctx=ctx; this.env=env; }
   async getState(){
@@ -63,6 +104,29 @@ export class KamalEngine extends DurableObject {
     if(request.method==='POST' && u.pathname==='/kill'){
       state.cfg.enabled=false; await this.log(state,'KILL SWITCH • new orders disabled'); await this.putState(state); return json(this.publicState(state));
     }
+    if(request.method==='GET' && u.pathname==='/telegram/status'){
+      const configured=tgReady(this.env);
+      if(!configured) return json({ok:true,configured:false,bot:null,chat:null,error:'Telegram secrets are not configured'});
+      try{
+        const me=await telegramCall(this.env,'getMe',{});
+        const chat=await telegramCall(this.env,'getChat',{chat_id:String(this.env.TELEGRAM_CHAT_ID)});
+        return json({
+          ok:true,configured:true,
+          bot:{id:me.result?.id||null,username:me.result?.username||null,name:me.result?.first_name||null},
+          chat:{id:chat.result?.id||null,type:chat.result?.type||null,title:chat.result?.title||chat.result?.username||chat.result?.first_name||null}
+        });
+      }catch(e){
+        return json({ok:false,configured:true,bot:null,chat:null,error:e.message});
+      }
+    }
+    if(request.method==='POST' && u.pathname==='/telegram/test'){
+      const fake={id:'TEST',symbol:'KAMAL',chain:'TEST',entry:1,current:1,notional:50,status:'OPEN',remaining:1,maxX:1};
+      const tg=await notifyTrade(this.env,fake,'TEST',1,0,'Telegram connection test');
+      if(!tg.ok&&!tg.skipped) await this.log(state,`TELEGRAM TEST ERROR • ${tg.error}`);
+      else if(tg.ok) await this.log(state,'TELEGRAM TEST SENT');
+      else await this.log(state,'TELEGRAM NOT CONFIGURED • set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID');
+      await this.putState(state); return json({ok:tg.ok,configured:tgReady(this.env),error:tg.error||null,state:this.publicState(state)});
+    }
     if(request.method==='POST' && u.pathname==='/tick'){ await this.tick(state,true); return json(this.publicState(await this.getState())); }
     return new Response('Not found',{status:404});
   }
@@ -71,7 +135,7 @@ export class KamalEngine extends DurableObject {
   }
   publicState(s){
     const open=(s.trades||[]).filter(t=>t.status==='OPEN');
-    return {ok:true,engine:s.cfg.enabled?'ON':'OFF',mode:s.cfg.mode,config:{...s.cfg},openTrades:open,tradesCount:s.trades.length,dayPnl:this.dayPnl(s),logs:s.logs||[],serverTime:now(),lastScan:s.cfg.lastScan||0,lastTick:s.cfg.lastTick||0};
+    return {ok:true,engine:s.cfg.enabled?'ON':'OFF',mode:s.cfg.mode,config:{...s.cfg},telegram:{configured:tgReady(this.env)},openTrades:open,tradesCount:s.trades.length,dayPnl:this.dayPnl(s),logs:s.logs||[],serverTime:now(),lastScan:s.cfg.lastScan||0,lastTick:s.cfg.lastTick||0};
   }
   dayPnl(s){ const d=new Date(); d.setUTCHours(0,0,0,0); return (s.trades||[]).filter(t=>t.status==='CLOSED'&&num(t.closedAt)>=d.getTime()).reduce((a,t)=>a+num(t.pnl),0); }
   openTrades(s){ return s.trades.filter(t=>t.status==='OPEN'); }
@@ -94,17 +158,17 @@ export class KamalEngine extends DurableObject {
   }
   async openTrade(x,state){
     const p=x.p,m=x.meta,cfg=state.cfg;if(!this.eligible(x,cfg,state)||this.openTrades(state).length>=cfg.maxOpen)return false;if(num(m.dataAt)&&now()-num(m.dataAt)>20000)return false;const pl=makePlan(p,m,cfg.size);if(!pl)return false;
-    const t={id:'M'+now().toString(36)+Math.random().toString(36).slice(2,6),createdAt:now(),key:keyFor(p),pairAddress:m.pairAddress||p.pairAddress||'',quoteSymbol:m.quoteSymbol||p.quoteToken?.symbol||'',chain:p.chainId,address:p.baseToken.address,symbol:p.baseToken.symbol||'TOKEN',mode:cfg.mode,side:'BUY',entry:pl.entry,current:pl.entry,sl:pl.sl,tp1:pl.tp1,tp2:pl.tp2,tp3:pl.tp3,runner2:pl.runner2,runner5:pl.runner5,runner10:pl.runner10,runner25:pl.runner25,runner50:pl.runner50,runner100:pl.runner100,runner250:pl.runner250,runner500:pl.runner500,runner1000:pl.runner1000,initialSL:pl.sl,notional:pl.notional,remaining:1,realized:0,pnl:0,status:'OPEN',stage:m.stage,score:m.huntScore,x100Score:m.x100Score,hit:'',tp1Done:false,tp2Done:false,tp3Done:false,r2Done:false,r5Done:false,r10Done:false,r25Done:false,r50Done:false,r100Done:false,r250Done:false,r500Done:false,r1000Done:false,belowSLCount:0,lastObservedPrice:pl.entry};
-    const ex=await this.execute('BUY',t,t.notional,t.entry,'ENTRY',state); if(!ex.ok)return false;state.trades.push(t);await this.log(state,`BUY ${t.symbol} @ ${t.entry} • ${m.stage} ${m.huntScore}`);return true;
+    const t={id:'M'+now().toString(36)+Math.random().toString(36).slice(2,6),createdAt:now(),key:keyFor(p),pairAddress:m.pairAddress||p.pairAddress||'',quoteSymbol:m.quoteSymbol||p.quoteToken?.symbol||'',chain:p.chainId,address:p.baseToken.address,symbol:p.baseToken.symbol||'TOKEN',mode:cfg.mode,side:'BUY',entry:pl.entry,current:pl.entry,sl:pl.sl,tp1:pl.tp1,tp2:pl.tp2,tp3:pl.tp3,runner2:pl.runner2,runner5:pl.runner5,runner10:pl.runner10,runner25:pl.runner25,runner50:pl.runner50,runner100:pl.runner100,runner250:pl.runner250,runner500:pl.runner500,runner1000:pl.runner1000,initialSL:pl.sl,notional:pl.notional,remaining:1,realized:0,pnl:0,status:'OPEN',stage:m.stage,score:m.huntScore,x100Score:m.x100Score,hit:'',tp1Done:false,tp2Done:false,tp3Done:false,r2Done:false,r5Done:false,r10Done:false,r25Done:false,r50Done:false,r100Done:false,r250Done:false,r500Done:false,r1000Done:false,belowSLCount:0,lastObservedPrice:pl.entry,maxX:1,telegramLastEvent:''};
+    const ex=await this.execute('BUY',t,t.notional,t.entry,'ENTRY',state); if(!ex.ok)return false;state.trades.push(t);await this.log(state,`BUY ${t.symbol} @ ${t.entry} • ${m.stage} ${m.huntScore}`);const tg=await notifyTrade(this.env,t,'ENTRY',t.entry,0,`${m.stage} • score ${m.huntScore} • x100 ${m.x100Score}`);if(tg.error)await this.log(state,`TELEGRAM ENTRY ERROR • ${tg.error}`);return true;
   }
-  async closePart(t,portion,price,reason,state){const qty=t.notional*portion;const pnl=(price-t.entry)/t.entry*qty;const ex=await this.execute('SELL',t,qty,price,reason,state);if(!ex.ok)return false;t.pnl+=pnl;t.realized+=portion;t.remaining=clamp(1-t.realized,0,1);await this.log(state,`SELL ${t.symbol} ${reason} ${Math.round(portion*100)}% @ ${price} • ${money(pnl)}`);return true;}
+  async closePart(t,portion,price,reason,state){const qty=t.notional*portion;const pnl=(price-t.entry)/t.entry*qty;const ex=await this.execute('SELL',t,qty,price,reason,state);if(!ex.ok)return false;t.pnl+=pnl;t.realized+=portion;t.remaining=clamp(1-t.realized,0,1);await this.log(state,`SELL ${t.symbol} ${reason} ${Math.round(portion*100)}% @ ${price} • ${money(pnl)}`);const tg=await notifyTrade(this.env,t,reason,price,pnl,`Closed portion ${Math.round(portion*100)}%`);if(tg.error)await this.log(state,`TELEGRAM ${reason} ERROR • ${tg.error}`);return true;}
   async processTrade(t,p,state){
     const price=num(p?.priceUsd); if(!price||t.status!=='OPEN')return;
-    t.current=price; t.lastObservedPrice=price;
+    t.current=price; t.lastObservedPrice=price; t.maxX=Math.max(num(t.maxX)||1,xMultiple(t.entry,price));
     const hardSL=t.sl*0.985;
     if(price<=t.sl)t.belowSLCount=num(t.belowSLCount)+1;else t.belowSLCount=0;
     if(price<=hardSL || t.belowSLCount>=2){
-      if(await this.closePart(t,t.remaining,price,'SL',state)){t.status='CLOSED';t.closedAt=now();t.result='LOSS';t.hit='SL';}
+      if(await this.closePart(t,t.remaining,price,'SL',state)){t.status='CLOSED';t.closedAt=now();t.result='LOSS';t.hit='SL';const tg=await notifyTrade(this.env,t,'FINAL • SL',price,t.pnl,`Max X ${t.maxX.toFixed(2)}X`);if(tg.error)await this.log(state,`TELEGRAM FINAL ERROR • ${tg.error}`);}
       return;
     }
     if(!t.tp1Done&&price>=t.tp1&&await this.closePart(t,.35,t.tp1,'TP1',state)){t.tp1Done=true;t.hit='TP1';t.sl=Math.max(t.sl,t.entry);t.belowSLCount=0;}
@@ -112,8 +176,50 @@ export class KamalEngine extends DurableObject {
     if(!t.tp3Done&&price>=t.tp3&&await this.closePart(t,Math.min(t.remaining,.10),t.tp3,'TP3 • 10%',state)){t.tp3Done=true;t.hit='TP3';t.sl=Math.max(t.sl,t.tp2);t.belowSLCount=0;}
     const steps=[['r2Done','runner2','2X'],['r5Done','runner5','5X'],['r10Done','runner10','10X'],['r25Done','runner25','25X'],['r50Done','runner50','50X'],['r100Done','runner100','100X'],['r250Done','runner250','250X'],['r500Done','runner500','500X']];
     for(const [done,key,label] of steps){if(!t[done]&&price>=t[key]&&t.remaining>=.02&&await this.closePart(t,.02,t[key],label,state)){t[done]=true;t.hit=label;t.sl=Math.max(t.sl,t.entry);t.belowSLCount=0;}}
-    if(!t.r1000Done&&price>=t.runner1000&&t.remaining>0&&await this.closePart(t,t.remaining,t.runner1000,'1000X RUNNER',state)){t.r1000Done=true;t.hit='1000X RUNNER';t.status='CLOSED';t.closedAt=now();t.result='1000X+ RUNNER';}
+    if(!t.r1000Done&&price>=t.runner1000&&t.remaining>0&&await this.closePart(t,t.remaining,t.runner1000,'1000X RUNNER',state)){t.r1000Done=true;t.hit='1000X RUNNER';t.status='CLOSED';t.closedAt=now();t.result='1000X+ RUNNER';const tg=await notifyTrade(this.env,t,'FINAL • 1000X RUNNER',t.runner1000,t.pnl,`Max X ${t.maxX.toFixed(2)}X`);if(tg.error)await this.log(state,`TELEGRAM FINAL ERROR • ${tg.error}`);}
   }
+  async discover(){
+    const [profiles, boosts] = await Promise.all([
+      getJSON(PROFILE).catch(()=>[]),
+      getJSON(BOOST).catch(()=>[])
+    ]);
+    const sources = [
+      ...(Array.isArray(profiles)?profiles:[]),
+      ...(Array.isArray(boosts)?boosts:[])
+    ];
+    const byChain = new Map();
+    for(const item of sources){
+      const chain = String(item?.chainId||'').trim();
+      const address = String(item?.tokenAddress||'').trim();
+      if(!chain || !address) continue;
+      if(!byChain.has(chain)) byChain.set(chain,new Set());
+      const set=byChain.get(chain);
+      if(set.size<24) set.add(address);
+    }
+    const rows=[];
+    for(const [chain,set] of byChain){
+      const addresses=[...set];
+      if(!addresses.length) continue;
+      for(let i=0;i<addresses.length;i+=30){
+        const chunk=addresses.slice(i,i+30);
+        try{
+          const data=await getJSON(TOKENS(chain,chunk));
+          const pairs=Array.isArray(data)?data:[];
+          for(const p of pairs){
+            if(!p?.baseToken?.address || !p?.priceUsd) continue;
+            const meta=scorePair(p);
+            rows.push({p,meta});
+          }
+        }catch(e){
+          // One chain failing should not stop discovery on other chains.
+          await this.log(await this.getState(),`DISCOVERY ${chain} • ${e.message}`);
+        }
+      }
+    }
+    rows.sort((a,b)=>Number(b.meta.x100Score)-Number(a.meta.x100Score) || Number(b.meta.huntScore)-Number(a.meta.huntScore));
+    return rows.slice(0,60);
+  }
+
   async refreshOpen(state){
     const opens=this.openTrades(state); await Promise.all(opens.map(async t=>{
       try{

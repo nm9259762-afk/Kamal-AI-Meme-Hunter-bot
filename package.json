@@ -1,0 +1,14 @@
+{
+  "name": "kamal-ai-meme-hunter-24-7",
+  "private": true,
+  "version": "2.0.0",
+  "description": "KAMAL AI Meme Hunter 24/7 server engine for Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "latest"
+  }
+}
